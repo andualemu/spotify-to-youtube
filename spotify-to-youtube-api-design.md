@@ -191,6 +191,99 @@ Caching YouTube search results avoids redundant API calls when multiple users sy
 
 ---
 
+## Work Items
+
+Broken into phases. Each phase produces something that runs end-to-end before moving on.
+
+### Phase 1 — Project Skeleton
+Get a basic server running with no business logic.
+
+| # | Task | Description |
+|---|---|---|
+| 1.1 | Init repo | Set up Node.js + TypeScript project, Fastify, linting, `.env` config |
+| 1.2 | Health check endpoint | `GET /health` returns `{ status: "ok" }` — confirms server boots |
+| 1.3 | Docker setup | `docker-compose.yml` with PostgreSQL and Redis containers |
+| 1.4 | Database connection | Connect to PostgreSQL, confirm connection on startup |
+| 1.5 | Redis connection | Connect to Redis, confirm connection on startup |
+
+---
+
+### Phase 2 — Authentication
+Users can log in with Spotify and Google before anything else works.
+
+| # | Task | Description |
+|---|---|---|
+| 2.1 | Spotify OAuth | `GET /auth/spotify` redirects to Spotify login |
+| 2.2 | Spotify callback | `POST /auth/spotify/callback` exchanges code for tokens, stores in Redis |
+| 2.3 | Google OAuth | `GET /auth/google` redirects to Google login |
+| 2.4 | Google callback | `POST /auth/google/callback` exchanges code for tokens, stores in Redis |
+| 2.5 | Token refresh | Auto-refresh Spotify + Google tokens before expiry |
+| 2.6 | Session middleware | Protect all non-auth routes — reject requests with no valid session |
+
+---
+
+### Phase 3 — Spotify Integration
+Fetch playlist data from Spotify.
+
+| # | Task | Description |
+|---|---|---|
+| 3.1 | List playlists | `GET /playlists` returns user's Spotify playlists |
+| 3.2 | Fetch tracks | Given a playlist ID, fetch all tracks with name, artist, duration, ISRC |
+| 3.3 | Pagination | Handle Spotify playlists with 100+ tracks (Spotify paginates at 100) |
+
+---
+
+### Phase 4 — Track Matching
+Resolve each Spotify track to a YouTube video ID.
+
+| # | Task | Description |
+|---|---|---|
+| 4.1 | ISRC lookup | Query `youtube/v3/videos` with ISRC code (1 unit per track) |
+| 4.2 | Text search fallback | Query `youtube/v3/search` by track name + artist when ISRC fails (100 units) |
+| 4.3 | Candidate scoring | Score results by title similarity, VEVO/artist channel, duration match |
+| 4.4 | Redis cache | Cache every resolved track ID in Redis with 24h TTL |
+| 4.5 | Unmatched handling | Mark track as `unmatched` if no result clears confidence threshold |
+
+---
+
+### Phase 5 — Job Queue
+Move sync work to the background so HTTP connections don't time out.
+
+| # | Task | Description |
+|---|---|---|
+| 5.1 | BullMQ setup | Configure BullMQ with Redis, define sync job structure |
+| 5.2 | Job worker | Worker picks up sync jobs, runs Phase 4 matching for each track |
+| 5.3 | Job persistence | Save job state + results to PostgreSQL as worker progresses |
+| 5.4 | `POST /sync` | Creates a job, returns `job_id` immediately |
+| 5.5 | `GET /jobs/:id` | Returns job status, summary, and per-track results from PostgreSQL |
+
+---
+
+### Phase 6 — YouTube Playlist Creation
+Write matched tracks back to YouTube.
+
+| # | Task | Description |
+|---|---|---|
+| 6.1 | Create playlist | Call YouTube API to create a new playlist with given name + visibility |
+| 6.2 | Add videos | Insert matched video IDs into the playlist in order |
+| 6.3 | Rollback on failure | If playlist creation fails, do not leave a partial playlist behind |
+| 6.4 | Return playlist URL | Include `youtube_playlist_id` in `GET /jobs/:id` response on completion |
+
+---
+
+### Phase 7 — Hardening
+Make it production-ready.
+
+| # | Task | Description |
+|---|---|---|
+| 7.1 | Quota monitoring | Track YouTube units used per day; log alert at 80% |
+| 7.2 | Retry logic | Exponential backoff on Spotify 429s and YouTube 5xx errors |
+| 7.3 | Quota exhausted error | Fail job gracefully with `quota_exceeded` status when limit hit |
+| 7.4 | Rate limiting | Limit `POST /sync` requests per user to prevent abuse |
+| 7.5 | Input validation | Validate all request bodies via Fastify JSON Schema |
+
+---
+
 ## Open Questions
 
 1. **Duplicate handling** — if a user syncs the same Spotify playlist twice, should we update the existing YouTube playlist or create a new one?
